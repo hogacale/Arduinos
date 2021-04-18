@@ -1,0 +1,233 @@
+#include <Vector.h>
+
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+//needed for library (Wifi Manager)
+#include <Hash.h>
+#include "HTTPSRedirect.h"
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+#ifndef STASSID
+
+int sensorPin = 0;
+
+
+/*
+  #define STASSID "Mark-PC_Mobile"
+  #define STAPSK  "2qms-2jfl-bjzr"
+*/
+#define STASSID "phantomranch";
+#define STAPSK "theranch";
+#endif
+
+HTTPSRedirect* client = nullptr;
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
+
+char serverName[] = "script.google.com";
+const int httpsPort = 443;
+
+char deviceName[40];
+
+const unsigned long milliDay = 86400000/2;
+
+
+void setup() {
+  String response;
+  Serial.begin(115200); // Starting Serial Terminal
+  Serial.println("Code Started");
+  delay(1000);
+  setupWifi();
+
+//===============Pin configuration======================
+//D1 = Occupied
+  pinMode(16,OUTPUT);
+//D2 = control override  
+  pinMode(4,OUTPUT);
+//======================================================
+
+  client = new HTTPSRedirect(httpsPort);
+  client->setInsecure();
+  client->setPrintResponseBody(true);
+  client->setContentTypeHeader("application/json");
+
+  Serial.println("Starting measurement");
+
+  float temperature = getTemperature();
+  temperature = 10;
+
+
+  response = sendPost(temperature);
+  Serial.println(response);
+  delete client;
+  String parts[4];
+  for(int i = 0;i < 4;i++){
+    parts[i] = split(response,',',i);
+//    Serial.println(parts[i]);
+  }
+  outputs(parts);
+}
+
+void loop() {
+  //  Restarts esp daily
+//    long duration, inches, cm;
+//    digitalWrite(trigPin, LOW);
+//  delayMicroseconds(2);
+//  digitalWrite(trigPin, HIGH);
+//  delayMicroseconds(10);
+//  digitalWrite(trigPin, LOW);
+//
+//  duration = pulseIn(echoPin, HIGH);
+//  cm = microsecondsToCentimeters(duration);
+//  
+//  delay(2000);
+//  Serial.println(cm);
+  
+  if (millis() >= milliDay) {
+    ESP.restart();
+  }
+
+}
+
+String split(String data, char separator, int index)
+{
+  int found = 0;
+  int strIndex[] = {0, -1};
+  int maxIndex = data.length()-1;
+
+  for(int i=0; i<=maxIndex && found<=index; i++){
+    if(data.charAt(i)==separator || i==maxIndex){
+        found++;
+        strIndex[0] = strIndex[1]+1;
+        strIndex[1] = (i == maxIndex) ? i+1 : i;
+    }
+  }
+
+  return found>index ? data.substring(strIndex[0], strIndex[1]) : "";
+}
+
+void outputs(String a[]){
+//  Occupational status
+  int occTemp;
+  int unOccTemp;
+  boolean occStatus;
+  boolean contOverride;
+  if(a[0] == "true"){
+    occStatus = true;
+    Serial.println("Building is occupied");
+    digitalWrite(16,HIGH);
+  } else {
+    digitalWrite(16,LOW);
+    Serial.println("Building is not occupied");
+    occStatus = false;
+  }
+  occTemp = a[1].toInt();
+  unOccTemp = a[2].toInt();
+//  Serial.println(a[3]);
+  a[3].trim();
+  if(a[3] == "true"){
+    contOverride = true;
+    Serial.println("No guest control");
+    digitalWrite(4,HIGH);
+  } else {
+    contOverride = false;
+    Serial.println("Guests have control");
+    digitalWrite(4,LOW);
+  }
+}
+
+float getTemperature(){
+  //getting the voltage reading from the temperature sensor
+     int reading = analogRead(sensorPin);  
+     
+     // converting that reading to voltage, for 3.3v arduino use 3.3
+     float voltage = reading * 3.3;
+     voltage /= 1024.0; 
+     
+     // print out the voltage
+//     Serial.print(voltage); Serial.println(" volts");
+      // now print out the temperature
+     float temperatureC = (voltage - 0.5) * 100 ;  //converting from 10 mv per degree with 500 mV offset
+                                                   //to degrees ((voltage - 500mV) times 100)
+     Serial.print(temperatureC); Serial.println(" degrees C");
+     // now convert to Fahrenheit
+     float temperatureF = (temperatureC * 9.0 / 5.0) + 32.0;
+     Serial.print(temperatureF); Serial.println(" degrees F");
+     return temperatureF;
+}
+
+String sendPost(float cm) {
+  //Setup the https redirect
+
+  bool flag = false;
+  for (int i = 0; i < 5; i++) {
+    int retval = client->connect(serverName, httpsPort);
+    if (retval == 1) {
+      flag = true;
+      break;
+    }
+    else
+      Serial.println("Connection failed. Retrying...");
+  }
+
+  if (!flag) {
+    Serial.print("Could not connect to server: ");
+    Serial.println(serverName);
+    Serial.println("Exiting...");
+    return "Failed to connect";
+  }
+  String hash = getHash();
+  Serial.println(hash);
+  String url = String("/macros/s/AKfycbxpZapekW6AcBXFVidftBFSPNU-6LO8ucyTgXTa0b5maiRiIrAXgdjMs1uyk6BvnY4/exec?data=temperature");
+  url.concat("," + hash + "," + String(cm));
+  Serial.println(url);
+  client ->GET(url, serverName);
+  Serial.println(String("Temperature ") + cm +  " recorded");
+  String temp = client->getResponseBody();
+  return temp;
+}
+
+long microsecondsToCentimeters(long microseconds) {
+  return microseconds / 29 / 2;
+}
+
+String getHash() {
+  return sha1(WiFi.macAddress() + "::" + ESP.getChipId());
+}
+
+
+bool setupWifi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Prepping Wifi Config of ");
+    Serial.println(deviceName);
+    WiFiManagerParameter custom_deviceName("Device Name", "Device name", deviceName, 40);
+
+    char chipId[30];
+    snprintf(chipId, 30, "ESP%i", ESP.getChipId());
+    Serial.println(chipId);
+
+    //WiFiManager
+    //Local intialization. Once its business is done, there is no need to keep it around
+    WiFiManager wifiManager;
+    //reset saved settings
+    //wifiManager.resetSettings();
+
+    //add all your parameters here
+    wifiManager.addParameter(&custom_deviceName);
+
+    wifiManager.autoConnect(chipId, "password");
+
+
+    //read updated parameters
+    strcpy(deviceName, custom_deviceName.getValue());
+
+    //if you get here you have connected to the WiFi
+    Serial.println("connected...yeey :)");
+    return true;
+  }
+  else {
+    return true;
+  }
+}
