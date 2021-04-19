@@ -1,5 +1,3 @@
-#include <Vector.h>
-
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h>
 //needed for library (Wifi Manager)
@@ -48,25 +46,28 @@ void setup() {
   pinMode(4,OUTPUT);
 //======================================================
 
+//================Http client setup=====================
   client = new HTTPSRedirect(httpsPort);
   client->setInsecure();
   client->setPrintResponseBody(true);
   client->setContentTypeHeader("application/json");
+//======================================================
 
   Serial.println("Starting measurement");
-
   float temperature = getTemperature();
   temperature = 10;
 
 
   response = sendPost(temperature);
-  Serial.println(response);
+ // Serial.println(response);
   delete client;
   String parts[4];
+//Parses the reply from the server
   for(int i = 0;i < 4;i++){
     parts[i] = split(response,',',i);
 //    Serial.println(parts[i]);
   }
+//Sets pin outputs
   outputs(parts);
 }
 
@@ -91,6 +92,7 @@ void loop() {
 
 }
 
+//Function that splits string by a character(i.e. comma)
 String split(String data, char separator, int index)
 {
   int found = 0;
@@ -114,6 +116,8 @@ void outputs(String a[]){
   int unOccTemp;
   boolean occStatus;
   boolean contOverride;
+ 
+//Occupational status decisions 
   if(a[0] == "true"){
     occStatus = true;
     Serial.println("Building is occupied");
@@ -123,10 +127,13 @@ void outputs(String a[]){
     Serial.println("Building is not occupied");
     occStatus = false;
   }
+//Sets values for temperatures(not 100% sure what to do with these values)  
   occTemp = a[1].toInt();
   unOccTemp = a[2].toInt();
+  
 //  Serial.println(a[3]);
   a[3].trim();
+//Control override decisions  
   if(a[3] == "true"){
     contOverride = true;
     Serial.println("No guest control");
@@ -139,6 +146,7 @@ void outputs(String a[]){
 }
 
 float getTemperature(){
+//=================THIS CODE LIKELY NEEDS TO BE ADJUSTED=========================
   //getting the voltage reading from the temperature sensor
      int reading = analogRead(sensorPin);  
      
@@ -160,7 +168,6 @@ float getTemperature(){
 
 String sendPost(float cm) {
   //Setup the https redirect
-
   bool flag = false;
   for (int i = 0; i < 5; i++) {
     int retval = client->connect(serverName, httpsPort);
@@ -178,13 +185,16 @@ String sendPost(float cm) {
     Serial.println("Exiting...");
     return "Failed to connect";
   }
+//Sets up the data to be sent  
   String hash = getHash();
-  Serial.println(hash);
+//  Serial.println(hash);
   String url = String("/macros/s/AKfycbxpZapekW6AcBXFVidftBFSPNU-6LO8ucyTgXTa0b5maiRiIrAXgdjMs1uyk6BvnY4/exec?data=temperature");
   url.concat("," + hash + "," + String(cm));
   Serial.println(url);
+//Sends data to created link above(Using http GET)  
   client ->GET(url, serverName);
   Serial.println(String("Temperature ") + cm +  " recorded");
+//Recieves data from the server and returns it  
   String temp = client->getResponseBody();
   return temp;
 }
