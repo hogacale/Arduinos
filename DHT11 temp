@@ -1,0 +1,412 @@
+#include <DHT.h>
+#include <Vector.h>
+#include <stdio.h>
+#include <string.h>
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+//needed for library (Wifi Manager)
+#include <Hash.h>
+#include "HTTPSRedirect.h"
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+#ifndef STASSID
+
+//#define DHTTYPE DHT22
+#define DHTTYPE DHT11
+#define DHTPIN 5
+DHT dht(DHTPIN,DHTTYPE);
+
+/*
+  #define STASSID "Mark-PC_Mobile"
+  #define STAPSK  "2qms-2jfl-bjzr"
+*/
+#define STASSID "phantomranch";
+#define STAPSK "theranch";
+#endif
+
+HTTPSRedirect* client = nullptr;
+
+const char* ssid = STASSID;
+const char* password = STAPSK;
+const int FURNACEPIN = 2;
+
+char serverName[] = "script.google.com";
+const int httpsPort = 443;
+
+char deviceName[40];
+
+int highAlert;
+int lowAlert;
+int occTemp;
+int unOccTemp;
+boolean occStatus;
+String parts[8];
+
+boolean furnaceOverride = false;
+boolean furnaceOverrideEnabled = false;
+
+//Timing variables
+unsigned long restartDelay = 900000;
+unsigned long alertDelay = 450000;
+unsigned long tempTime = 0;
+unsigned long furnaceDelay = 30000;
+unsigned long furnaceOnTime = 0;
+
+void setup() {
+  String response;
+  Serial.begin(115200); // Starting Serial Terminal
+  Serial.println("Code Started");
+  dht.begin();
+  delay(1000);
+  setupWifi();
+
+//===============Pin configuration======================
+//D0 = Override
+//  pinMode(16,OUTPUT);
+//D4 = Main control
+  pinMode(FURNACEPIN,OUTPUT);
+  digitalWrite(FURNACEPIN,LOW);
+//  pinMode(0,OUTPUT);
+//======================================================
+
+  Serial.println("Starting measurement");
+
+  float temperature = getTemperature();
+//  temperature = 10;
+
+
+  response = sendPost(temperature);
+  Serial.println(response);
+  delete client;
+  Serial.println("Response: " + response);
+//  Serial.println(temp1);
+//  outputs(strtok(temp,','));
+
+  for(int i = 0;i < 8;i++){
+    parts[i] = split(response,',',i);
+    Serial.println(parts[i]);
+  }
+  highAlert = parts[4].toInt();
+  lowAlert = parts[5].toInt();
+  //Alert checks
+  if(temperature > highAlert){
+    Serial.println("Sending alert for temperature being to high");
+    //Send Alert
+  }
+  if(temperature < lowAlert){
+    Serial.println("Sending alert for temperature being to low");
+    //Send Alert
+  }
+  restartDelay = parts[6].toInt();
+  alertDelay = parts[7].toInt();  
+  delay(5000);
+  outputs(parts);
+//  Set some times 
+  furnaceOnTime = millis() + furnaceDelay;
+}
+
+void loop() {
+//Restarts "daily" -> actually whatever value is given by the document  
+  if (millis() >= restartDelay) {
+    Serial.println("Restarting");
+    ESP.restart();
+  }
+//Check for furnace Override
+  if(millis() > furnaceOnTime + furnaceDelay){
+    furnaceOnTime = millis();
+    String furnOn = getFurnaceOverride();
+    furnOn.trim();
+    Serial.println("Furn on = " + furnOn);
+    if(furnOn.equals("On")){
+      Serial.println("Force furnace to be on");
+      furnaceOverrideEnabled = true;
+      furnaceOverride = true;
+      digitalWrite(FURNACEPIN,HIGH);
+    } else if(furnOn.equals("Off")){
+      Serial.println("Force furnace to be off");
+      furnaceOverrideEnabled = true;
+      furnaceOverride = false;
+      digitalWrite(FURNACEPIN,LOW);
+    } else {
+      Serial.println("No furnace override at all");
+      furnaceOverrideEnabled = false;
+      digitalWrite(FURNACEPIN,LOW);
+    }
+  }
+
+  if (millis() >= alertDelay + tempTime){
+    tempTime = millis();
+    float temperature = getTemperature();
+      //Alert checks
+   if(temperature > highAlert){
+      Serial.println("Sending alert for temperature being to high");
+      sendAlert();
+    }
+    if(temperature < lowAlert){
+      Serial.println("Sending alert for temperature being to low");
+      sendAlert();
+    }
+    if(!furnaceOverrideEnabled){
+      if(occStatus){
+         if(temperature < occTemp){
+          Serial.println("Turning Furnace on");
+          digitalWrite(FURNACEPIN,HIGH);
+        }
+        if(temperature > occTemp + 2) {
+          Serial.println("Furnace is off");
+          digitalWrite(FURNACEPIN,LOW);
+        }
+      } else {
+        if(temperature < unOccTemp){
+          Serial.println("Turning Furnace on");
+          digitalWrite(FURNACEPIN,HIGH);
+        } 
+        if(temperature < unOccTemp + 2) {
+          Serial.println("Furnace is off");
+          digitalWrite(FURNACEPIN,LOW);
+        }
+      }
+    } else {
+      if(furnaceOverride){
+        digitalWrite(FURNACEPIN,HIGH);
+      } else {
+        digitalWrite(FURNACEPIN,LOW);
+      }
+    }
+  }
+  
+}
+
+String split(String data, char separator, int index)
+{
+  int found = 0;
+  int strIndex[] = {0, -1};
+  int maxIndex = data.length()-1;
+
+  for(int i=0; i<=maxIndex && found<=index; i++){
+    if(data.charAt(i)==separator || i==maxIndex){
+        found++;
+        strIndex[0] = strIndex[1]+1;
+        strIndex[1] = (i == maxIndex) ? i+1 : i;
+    }
+  }
+
+  return found>index ? data.substring(strIndex[0], strIndex[1]) : "";
+}
+
+void outputs(String a[]){
+//  Occupational status
+  boolean contOverride;
+  if(a[0] == "true"){
+    occStatus = true;
+//    digitalWrite(16,LOW);
+    Serial.println("Building is occupied");
+    
+  } else {
+//    digitalWrite(16,HIGH);
+    Serial.println("Building is not occupied");
+    occStatus = false;
+  }
+  occTemp = a[1].toInt();
+  unOccTemp = a[2].toInt();
+//  Serial.println(a[3]);
+  a[3].trim();
+}
+
+float getTemperature(){
+  float temperatureF = dht.readTemperature(true);
+  Serial.print(temperatureF);
+  Serial.println("ºF");
+  return temperatureF;
+}
+//This will just send an alert because of temperature problem
+void sendAlert(){
+  //Setup the https redirect
+
+  client = new HTTPSRedirect(httpsPort);
+  client->setInsecure();
+  client->setPrintResponseBody(true);
+  client->setContentTypeHeader("application/json");
+
+  bool flag = false;
+  for (int i = 0; i < 5; i++) {
+    int retval = client->connect(serverName, httpsPort);
+    if (retval == 1) {
+      flag = true;
+      break;
+    }
+    else
+      Serial.println("Connection failed. Retrying...");
+  }
+
+  if (!flag) {
+    Serial.print("Could not connect to server: ");
+    Serial.println(serverName);
+    Serial.println("Exiting...");
+    return;
+  }
+  
+  String hash = getHash();
+  Serial.println(hash);
+  String url = String("/macros/s/AKfycbxpZapekW6AcBXFVidftBFSPNU-6LO8ucyTgXTa0b5maiRiIrAXgdjMs1uyk6BvnY4/exec?data=Tempalert");
+  url.concat("," + hash);
+  Serial.println(url);
+  client ->GET(url, serverName);
+  delete client;
+}
+
+String sendPost(float cm) {
+  //Setup the https redirect
+
+  client = new HTTPSRedirect(httpsPort);
+  client->setInsecure();
+  client->setPrintResponseBody(true);
+  client->setContentTypeHeader("application/json");
+
+  bool flag = false;
+  for (int i = 0; i < 5; i++) {
+    int retval = client->connect(serverName, httpsPort);
+    if (retval == 1) {
+      flag = true;
+      break;
+    }
+    else
+      Serial.println("Connection failed. Retrying...");
+  }
+
+  if (!flag) {
+    Serial.print("Could not connect to server: ");
+    Serial.println(serverName);
+    Serial.println("Exiting...");
+    delete client;
+    return "Failed to connect";
+  }
+  String hash = getHash();
+  Serial.println(hash);
+  String url = String("/macros/s/AKfycbxpZapekW6AcBXFVidftBFSPNU-6LO8ucyTgXTa0b5maiRiIrAXgdjMs1uyk6BvnY4/exec?data=temperature");
+  url.concat("," + hash + "," + String(cm));
+  Serial.println(url);
+  client ->GET(url, serverName);
+  Serial.println(String("Temperature ") + cm +  " recorded");
+  String temp = client->getResponseBody();
+//  delete client;
+  return temp;
+}
+
+String getFurnaceOverride() {
+  //Setup the https redirect
+
+  client = new HTTPSRedirect(httpsPort);
+  client->setInsecure();
+  client->setPrintResponseBody(true);
+  client->setContentTypeHeader("application/json");
+
+  bool flag = false;
+  for (int i = 0; i < 5; i++) {
+    int retval = client->connect(serverName, httpsPort);
+    if (retval == 1) {
+      flag = true;
+      break;
+    }
+    else
+      Serial.println("Connection failed. Retrying...");
+  }
+
+  if (!flag) {
+    Serial.print("Could not connect to server: ");
+    Serial.println(serverName);
+    Serial.println("Exiting...");
+    delete client;
+    return "Failed to connect";
+  }
+  String hash = getHash();
+  Serial.println(hash);
+  String url = String("/macros/s/AKfycbxpZapekW6AcBXFVidftBFSPNU-6LO8ucyTgXTa0b5maiRiIrAXgdjMs1uyk6BvnY4/exec?data=furnaceOn");
+  url.concat("," + hash);
+  Serial.println(url);
+  client ->GET(url, serverName);
+  String temp = client->getResponseBody();
+  delete client;
+  return temp;
+}
+
+long microsecondsToCentimeters(long microseconds) {
+  return microseconds / 29 / 2;
+}
+
+String getHash() {
+  return sha1(WiFi.macAddress() + "::" + ESP.getChipId());
+}
+
+void furnaceOn(){
+//  Will control how long the furnace runs for this can be changed easily
+Serial.println("Furnace On");
+  unsigned long turnOn = millis();
+  unsigned long duration = turnOn + 300000;
+  digitalWrite(FURNACEPIN,HIGH);
+//Option 1 - Wait for the temperature to go up 2 degrees above minimum
+  if(occStatus){
+//    Calling getTemperature this many times causes a heap overload
+//    Need to slow it down with delay most likely look every few seconds;
+//    Also probably need another thread to do this while the main loop thread continues to do its 
+//    recording and such
+    while(getTemperature() <= occTemp + 2){
+      digitalWrite(FURNACEPIN,LOW);
+      delay(2000);
+    }
+  } else {
+  while(getTemperature() <= unOccTemp +2){
+      
+      digitalWrite(FURNACEPIN,LOW);
+      delay(2000);
+    }
+  }
+//  Option 2 - Wait X amount of time declared above with duration
+  digitalWrite(FURNACEPIN,LOW);
+}
+
+
+bool setupWifi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Prepping Wifi Config of ");
+    Serial.println(deviceName);
+    WiFiManagerParameter custom_deviceName("Device Name", "Device name", deviceName, 40);
+
+    char chipId[30];
+    snprintf(chipId, 30, "ESP%i", ESP.getChipId());
+    Serial.println(chipId);
+
+    //WiFiManager
+    //Local intialization. Once its business is done, there is no need to keep it around
+    WiFiManager wifiManager;
+    //reset saved settings
+    //wifiManager.resetSettings();
+
+    //add all your parameters here
+    wifiManager.addParameter(&custom_deviceName);
+
+    //set custom ip for portal
+    //    wifiManager.setAPStaticIPConfig(IPAddress(10,0,1,1), IPAddress(10,0,1,1), IPAddress(255,255,255,0));
+
+    //    if (!wifiManager.startConfigPortal(chipId ,"configure")) {
+    //      Serial.println("failed to connect and hit timeout");
+    //      delay(3000);
+    //      //reset and try again, or maybe put it to deep sleep
+    //      ESP.reset();
+    //      delay(5000);
+    //    }
+    wifiManager.autoConnect(chipId, "password");
+
+
+    //read updated parameters
+    strcpy(deviceName, custom_deviceName.getValue());
+
+    //if you get here you have connected to the WiFi
+    Serial.println("connected...yeey :)");
+    return true;
+  }
+  else {
+    return true;
+  }
+}
